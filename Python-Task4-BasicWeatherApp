@@ -1,0 +1,650 @@
+import tkinter as tk
+from tkinter import ttk
+import requests
+from PIL import Image, ImageTk
+from io import BytesIO
+from datetime import datetime
+from collections import defaultdict
+import threading
+
+# ---------------- CONFIGURATION ----------------
+
+API_KEY = "58f3709de044d9985194a0bfce7dcd96"
+
+BASE_URL = "https://api.openweathermap.org/data/2.5"
+GEO_URL = "https://api.openweathermap.org/geo/1.0"
+
+# ---------------- MAIN APPLICATION ----------------
+
+class WeatherApp:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Weather Forecast Application")
+        self.root.geometry("950x850")
+        self.root.minsize(750, 650)
+
+        self.unit = "metric"
+        self.weather_icon = None
+        self.loading = False
+
+        self.setup_gui()
+
+    # ---------------- GUI DESIGN ----------------
+
+    def setup_gui(self):
+
+        title = tk.Label(
+            self.root,
+            text="WEATHER FORECAST APP",
+            font=("Arial", 24, "bold"),
+            fg="white",
+            bg="#1976D2",
+            pady=15
+        )
+        title.pack(fill="x")
+
+        # Search panel
+        search_frame = tk.Frame(self.root, pady=15)
+        search_frame.pack()
+
+        tk.Label(
+            search_frame,
+            text="Enter City / ZIP Code:",
+            font=("Arial", 12)
+        ).grid(row=0, column=0, padx=5)
+
+        self.city_entry = tk.Entry(
+            search_frame,
+            width=25,
+            font=("Arial", 12)
+        )
+        self.city_entry.grid(row=0, column=1, padx=5)
+
+        self.get_button = tk.Button(
+            search_frame,
+            text="Get Weather",
+            command=self.get_weather,
+            bg="#1976D2",
+            fg="white",
+            font=("Arial", 11, "bold")
+        )
+        self.get_button.grid(row=0, column=2, padx=5)
+
+        tk.Button(
+            search_frame,
+            text="Refresh",
+            command=self.get_weather,
+            font=("Arial", 10)
+        ).grid(row=0, column=3, padx=5)
+
+        tk.Button(
+            search_frame,
+            text="My Location",
+            command=self.detect_location,
+            font=("Arial", 10)
+        ).grid(row=0, column=4, padx=5)
+
+        # Temperature unit buttons
+        unit_frame = tk.Frame(self.root)
+        unit_frame.pack(pady=5)
+
+        tk.Button(
+            unit_frame,
+            text="Celsius (°C)",
+            command=lambda: self.change_unit("metric")
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            unit_frame,
+            text="Fahrenheit (°F)",
+            command=lambda: self.change_unit("imperial")
+        ).pack(side="left", padx=5)
+
+        # Error/status message
+        self.status_label = tk.Label(
+            self.root,
+            text="Enter a city name or ZIP code to get weather.",
+            fg="blue",
+            font=("Arial", 11)
+        )
+        self.status_label.pack(pady=5)
+
+        # Main current weather panel
+        self.current_frame = tk.LabelFrame(
+            self.root,
+            text="Current Weather",
+            font=("Arial", 14, "bold"),
+            padx=15,
+            pady=10
+        )
+        self.current_frame.pack(fill="x", padx=20, pady=10)
+
+        self.city_label = tk.Label(
+            self.current_frame,
+            text="City: --",
+            font=("Arial", 17, "bold")
+        )
+        self.city_label.pack()
+
+        self.icon_label = tk.Label(self.current_frame)
+        self.icon_label.pack()
+
+        self.temp_label = tk.Label(
+            self.current_frame,
+            text="Temperature: --",
+            font=("Arial", 20, "bold")
+        )
+        self.temp_label.pack()
+
+        self.description_label = tk.Label(
+            self.current_frame,
+            text="Condition: --",
+            font=("Arial", 13)
+        )
+        self.description_label.pack()
+
+        self.details_label = tk.Label(
+            self.current_frame,
+            text="Humidity: --     Wind: --",
+            font=("Arial", 12)
+        )
+        self.details_label.pack(pady=8)
+
+        # Forecast area
+        forecast_frame = tk.Frame(self.root)
+        forecast_frame.pack(fill="both", expand=True, padx=15, pady=10)
+
+        # Hourly forecast
+        self.hourly_frame = tk.LabelFrame(
+            forecast_frame,
+            text="Upcoming Forecast (3-hour intervals)",
+            font=("Arial", 12, "bold"),
+            padx=10,
+            pady=10
+        )
+        self.hourly_frame.pack(
+            fill="x",
+            pady=5
+        )
+
+        self.hourly_content = tk.Frame(self.hourly_frame)
+        self.hourly_content.pack()
+
+        # Daily forecast
+        self.daily_frame = tk.LabelFrame(
+            forecast_frame,
+            text="5-Day Forecast",
+            font=("Arial", 12, "bold"),
+            padx=10,
+            pady=10
+        )
+        self.daily_frame.pack(
+            fill="both",
+            expand=True,
+            pady=5
+        )
+
+        self.daily_content = tk.Frame(self.daily_frame)
+        self.daily_content.pack()
+
+    # ---------------- CITY VALIDATION ----------------
+
+    def get_coordinates(self, location):
+
+        location = location.strip()
+
+        if not location:
+            raise ValueError("Please enter a city name or ZIP code.")
+
+        # ZIP code with optional country code
+        if location.replace(",", "").replace(" ", "").isdigit() or (
+            "," in location and location.split(",")[0].strip().isdigit()
+        ):
+            parts = location.split(",")
+            zip_code = parts[0].strip()
+
+            country = (
+                parts[1].strip().upper()
+                if len(parts) > 1 and parts[1].strip()
+                else "IN"
+            )
+
+            response = requests.get(
+                f"{GEO_URL}/zip",
+                params={
+                    "zip": f"{zip_code},{country}",
+                    "appid": API_KEY
+                },
+                timeout=10
+            )
+
+            if response.status_code == 404:
+                raise ValueError("ZIP/PIN code not found.")
+
+            self.check_response(response)
+
+            data = response.json()
+
+            return data["lat"], data["lon"], data["name"]
+
+        # City name search
+        response = requests.get(
+            f"{GEO_URL}/direct",
+            params={
+                "q": location,
+                "limit": 1,
+                "appid": API_KEY
+            },
+            timeout=10
+        )
+
+        self.check_response(response)
+
+        data = response.json()
+
+        if not data:
+            raise ValueError("City not found. Please try another city.")
+
+        return data[0]["lat"], data[0]["lon"], data[0]["name"]
+
+    # ---------------- API ERROR HANDLING ----------------
+
+    def check_response(self, response):
+
+        if response.status_code == 401:
+            raise ValueError(
+                "Invalid API key. Please check your OpenWeatherMap API key."
+            )
+
+        if response.status_code == 404:
+            raise ValueError("Requested location was not found.")
+
+        if response.status_code == 429:
+            raise ValueError("API request limit exceeded. Try again later.")
+
+        if response.status_code != 200:
+            raise ValueError(
+                f"Weather API error: {response.status_code}"
+            )
+
+    # ---------------- GET WEATHER ----------------
+
+    def get_weather(self):
+
+        if self.loading:
+            return
+
+        location = self.city_entry.get().strip()
+
+        if not location:
+            self.show_error("Please enter a city name or ZIP code.")
+            return
+
+        if API_KEY == "YOUR_OPENWEATHERMAP_API_KEY":
+            self.show_error("Please add your OpenWeatherMap API key.")
+            return
+
+        self.loading = True
+        self.get_button.config(state="disabled")
+        self.status_label.config(text="Fetching weather data...")
+
+        # Run API calls without freezing the GUI
+        threading.Thread(
+            target=self.fetch_weather,
+            args=(location,),
+            daemon=True
+        ).start()
+
+    def fetch_weather(self, location):
+
+        try:
+            lat, lon, city = self.get_coordinates(location)
+
+            # Current weather API
+            current_response = requests.get(
+                f"{BASE_URL}/weather",
+                params={
+                    "lat": lat,
+                    "lon": lon,
+                    "appid": API_KEY,
+                    "units": self.unit
+                },
+                timeout=10
+            )
+
+            self.check_response(current_response)
+            current_data = current_response.json()
+
+            # 5-day forecast API
+            forecast_response = requests.get(
+                f"{BASE_URL}/forecast",
+                params={
+                    "lat": lat,
+                    "lon": lon,
+                    "appid": API_KEY,
+                    "units": self.unit
+                },
+                timeout=10
+            )
+
+            self.check_response(forecast_response)
+            forecast_data = forecast_response.json()
+
+            self.root.after(
+                0,
+                lambda: self.display_weather(
+                    city, current_data, forecast_data
+                )
+            )
+
+        except requests.exceptions.Timeout:
+            self.show_error("Network timeout. Please try again.")
+
+        except requests.exceptions.ConnectionError:
+            self.show_error("No internet connection.")
+
+        except requests.exceptions.RequestException:
+            self.show_error("Unable to connect to weather service.")
+
+        except (ValueError, KeyError) as error:
+            self.show_error(str(error))
+
+        except Exception as error:
+            self.show_error(f"Unexpected error: {error}")
+
+        finally:
+            self.root.after(0, self.finish_loading)
+
+    def finish_loading(self):
+        self.loading = False
+        self.get_button.config(state="normal")
+
+    # ---------------- DISPLAY CURRENT WEATHER ----------------
+
+    def display_weather(self, city, current, forecast):
+
+        self.status_label.config(
+            text="Weather updated successfully!",
+            fg="green"
+        )
+
+        self.city_label.config(text=f"City: {city}")
+
+        temp = current["main"]["temp"]
+        humidity = current["main"]["humidity"]
+        wind = current["wind"]["speed"]
+
+        description = current["weather"][0]["description"].title()
+        icon_code = current["weather"][0]["icon"]
+
+        # Convert temperature
+        if self.unit == "metric":
+            celsius = temp
+            fahrenheit = (temp * 9 / 5) + 32
+            wind_unit = "m/s"
+        else:
+            fahrenheit = temp
+            celsius = (temp - 32) * 5 / 9
+            wind_unit = "mph"
+
+        self.temp_label.config(
+            text=f"{temp:.1f}°{'C' if self.unit == 'metric' else 'F'}"
+        )
+
+        self.description_label.config(
+            text=f"Condition: {description}"
+        )
+
+        self.details_label.config(
+            text=(
+                f"Temperature: {celsius:.1f}°C / {fahrenheit:.1f}°F\n"
+                f"Humidity: {humidity}%     "
+                f"Wind: {wind} {wind_unit}"
+            )
+        )
+
+        # Weather icon
+        self.load_icon(icon_code, self.icon_label)
+
+        # Forecast panels
+        self.display_hourly(forecast)
+        self.display_daily(forecast)
+
+    # ---------------- LOAD WEATHER ICON ----------------
+
+    def load_icon(self, code, label):
+
+        def download():
+            try:
+                url = f"https://openweathermap.org/img/wn/{code}@2x.png"
+
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+
+                image = Image.open(
+                    BytesIO(response.content)
+                ).resize((80, 80))
+
+                photo = ImageTk.PhotoImage(image)
+
+                self.root.after(
+                    0,
+                    lambda: self.set_icon(label, photo)
+                )
+
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=download,
+            daemon=True
+        ).start()
+
+    def set_icon(self, label, photo):
+        label.config(image=photo)
+        label.image = photo
+
+    # ---------------- HOURLY FORECAST ----------------
+
+    def display_hourly(self, forecast):
+
+        for widget in self.hourly_content.winfo_children():
+            widget.destroy()
+
+        entries = forecast["list"][:2]
+
+        for index, item in enumerate(entries):
+
+            time = datetime.fromtimestamp(item["dt"])
+            temp = item["main"]["temp"]
+            description = item["weather"][0]["description"].title()
+            icon_code = item["weather"][0]["icon"]
+
+            frame = tk.Frame(
+                self.hourly_content,
+                padx=20,
+                pady=5
+            )
+            frame.grid(row=0, column=index)
+
+            tk.Label(
+                frame,
+                text=time.strftime("%I:%M %p"),
+                font=("Arial", 10, "bold")
+            ).pack()
+
+            icon_label = tk.Label(frame)
+            icon_label.pack()
+
+            self.load_icon(icon_code, icon_label)
+
+            tk.Label(
+                frame,
+                text=f"{temp:.1f}°{'C' if self.unit == 'metric' else 'F'}"
+            ).pack()
+
+            tk.Label(
+                frame,
+                text=description,
+                wraplength=120
+            ).pack()
+
+    # ---------------- DAILY FORECAST ----------------
+
+    def display_daily(self, forecast):
+
+        for widget in self.daily_content.winfo_children():
+            widget.destroy()
+
+        daily_data = defaultdict(list)
+
+        today = datetime.now().date()
+
+        # Group forecast entries by date
+        for item in forecast["list"]:
+
+            date = datetime.fromtimestamp(item["dt"]).date()
+
+            if date > today:
+                daily_data[date].append(item)
+
+        # Show next five days
+        dates = sorted(daily_data.keys())[:5]
+
+        for index, date in enumerate(dates):
+
+            items = daily_data[date]
+
+            # Select forecast closest to noon
+            item = min(
+                items,
+                key=lambda x: abs(
+                    datetime.fromtimestamp(x["dt"]).hour - 12
+                )
+            )
+
+            temp = item["main"]["temp"]
+            description = item["weather"][0]["description"].title()
+            icon_code = item["weather"][0]["icon"]
+
+            frame = tk.Frame(
+                self.daily_content,
+                padx=12,
+                pady=8,
+                relief="ridge",
+                borderwidth=1
+            )
+
+            frame.grid(
+                row=0,
+                column=index,
+                padx=5,
+                pady=5
+            )
+
+            tk.Label(
+                frame,
+                text=date.strftime("%a, %d %b"),
+                font=("Arial", 10, "bold")
+            ).pack()
+
+            icon_label = tk.Label(frame)
+            icon_label.pack()
+
+            self.load_icon(icon_code, icon_label)
+
+            tk.Label(
+                frame,
+                text=f"{temp:.1f}°{'C' if self.unit == 'metric' else 'F'}",
+                font=("Arial", 11, "bold")
+            ).pack()
+
+            tk.Label(
+                frame,
+                text=description,
+                wraplength=110
+            ).pack()
+
+    # ---------------- TEMPERATURE UNIT TOGGLE ----------------
+
+    def change_unit(self, unit):
+
+        if self.unit == unit:
+            return
+
+        self.unit = unit
+
+        if self.city_entry.get().strip():
+            self.get_weather()
+
+    # ---------------- AUTOMATIC LOCATION ----------------
+
+    def detect_location(self):
+
+        if self.loading:
+            return
+
+        self.status_label.config(
+            text="Detecting your location..."
+        )
+
+        def find_location():
+
+            try:
+                response = requests.get(
+                    "https://ipinfo.io/json",
+                    timeout=10
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+                city = data.get("city")
+
+                if not city:
+                    raise ValueError("Unable to detect your city.")
+
+                self.root.after(
+                    0,
+                    lambda: self.use_detected_city(city)
+                )
+
+            except Exception as error:
+                self.show_error(
+                    f"Location detection failed: {error}"
+                )
+
+        threading.Thread(
+            target=find_location,
+            daemon=True
+        ).start()
+
+    def use_detected_city(self, city):
+
+        self.city_entry.delete(0, tk.END)
+        self.city_entry.insert(0, city)
+        self.get_weather()
+
+    # ---------------- ERROR DISPLAY ----------------
+
+    def show_error(self, message):
+
+        def update():
+            self.status_label.config(
+                text=message,
+                fg="red"
+            )
+
+        self.root.after(0, update)
+
+
+# ---------------- RUN APPLICATION ----------------
+
+if __name__ == "__main__":
+
+    root = tk.Tk()
+
+    app = WeatherApp(root)
+
+    root.mainloop()
